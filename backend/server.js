@@ -55,13 +55,12 @@ io.on("connection", async (socket) => {
   const mac = queryMac || `UNKNOWN-${socket.id}`;
   let deviceLabel = queryLabel || `Device-${Math.floor(Math.random() * 10000)}`;
 
-  // 2. Persistent Storage Logic: Check or store MAC in MongoDB
+  // Persistent Storage Logic
   if (queryMac && queryMac !== "Unknown") {
     try {
       let existingDevice = await Device.findOne({ mac: queryMac });
 
       if (existingDevice) {
-        // Device seen before: update IP, last seen date, and label if changed
         existingDevice.lastIp = clientIp;
         existingDevice.lastSeen = new Date();
         if (queryLabel) existingDevice.label = queryLabel;
@@ -70,7 +69,6 @@ io.on("connection", async (socket) => {
         deviceLabel = existingDevice.label;
         console.log(`> Recognized returning device: ${deviceLabel} [MAC: ${queryMac}]`);
       } else {
-        // First time connecting: create new device entry in MongoDB
         await Device.create({
           mac: queryMac,
           label: deviceLabel,
@@ -84,7 +82,7 @@ io.on("connection", async (socket) => {
     }
   }
 
-  // 3. Store active connection details in memory map
+  // Store active connection details
   const deviceInfo = {
     socketId: socket.id,
     label: deviceLabel,
@@ -99,22 +97,55 @@ io.on("connection", async (socket) => {
   // Broadcast updated device list to ALL connected clients
   io.emit("online-devices", Array.from(onlineDevices.values()));
 
-  // Signaling Events
+  // ==========================================
+  // WEBRTC SIGNALING & ROOM LOGIC
+  // ==========================================
+
   socket.on("join-room", (roomId, userId) => {
+    const activeUser = userId || socket.id;
     socket.join(roomId);
-    socket.to(roomId).emit("user-connected", userId);
+    console.log(`> Socket [${socket.id}] joined room: [${roomId}]`);
+
+    // Notify existing room members that a viewer connected
+    socket.to(roomId).emit("user-connected", { userId: activeUser, socketId: socket.id });
+  });
+
+  // Event allowing a newly joined viewer to request a fresh offer from host
+  socket.on("request-stream", (payload) => {
+    console.log(`> Stream requested in room [${payload.roomId}] by [${socket.id}]`);
+    socket.to(payload.roomId).emit("request-stream", { requesterId: socket.id });
   });
 
   socket.on("offer", (payload) => {
-    io.to(payload.target).emit("offer", payload);
+    console.log(`> Signaling: OFFER from [${socket.id}] -> Target: [${payload.target || payload.roomId}]`);
+    const data = { ...payload, sender: socket.id };
+    
+    if (payload.target) {
+      io.to(payload.target).emit("offer", data);
+    } else if (payload.roomId) {
+      socket.to(payload.roomId).emit("offer", data);
+    }
   });
 
   socket.on("answer", (payload) => {
-    io.to(payload.target).emit("answer", payload);
+    console.log(`> Signaling: ANSWER from [${socket.id}] -> Target: [${payload.target || payload.roomId}]`);
+    const data = { ...payload, sender: socket.id };
+    
+    if (payload.target) {
+      io.to(payload.target).emit("answer", data);
+    } else if (payload.roomId) {
+      socket.to(payload.roomId).emit("answer", data);
+    }
   });
 
   socket.on("ice-candidate", (incoming) => {
-    io.to(incoming.target).emit("ice-candidate", incoming);
+    const data = { ...incoming, sender: socket.id };
+    
+    if (incoming.target) {
+      io.to(incoming.target).emit("ice-candidate", data);
+    } else if (incoming.roomId) {
+      socket.to(incoming.roomId).emit("ice-candidate", data);
+    }
   });
 
   socket.on("remote-control-event", (data) => {
@@ -124,11 +155,7 @@ io.on("connection", async (socket) => {
   // Handle Disconnection
   socket.on("disconnect", () => {
     console.log(`> Disconnected: ${deviceLabel} (${socket.id})`);
-    
-    // Remove device from active map
     onlineDevices.delete(socket.id);
-    
-    // Broadcast updated list to remaining clients
     io.emit("online-devices", Array.from(onlineDevices.values()));
   });
 });
