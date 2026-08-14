@@ -1,10 +1,6 @@
 const { createServer } = require("http");
-const express = require("express");
 const { Server } = require("socket.io");
 const mongoose = require("mongoose");
-
-// Initialize Express instead of Next.js
-const app = express();
 
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/remote-desktop";
 
@@ -17,9 +13,20 @@ mongoose.connect(MONGODB_URI)
     console.error("MongoDB connection error:", err);
   });
 
-const server = createServer(app);
+// Standard Node HTTP Server (No Express dependency required)
+const server = createServer((req, res) => {
+  // Basic health check endpoint
+  if (req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("OK");
+    return;
+  }
+  
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Signaling server running");
+});
 
-// Initialize Socket.io with CORS enabled
+// Initialize Socket.io
 const io = new Server(server, {
   cors: { origin: "*" },
 });
@@ -52,7 +59,6 @@ io.on("connection", (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, (err) => {
-  if (err) throw err;
+server.listen(PORT, () => {
   console.log(`> Signaling server ready on port ${PORT}`);
 });
