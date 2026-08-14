@@ -1,7 +1,7 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Monitor, Share2, ShieldCheck, ArrowRight, Wifi, Cpu } from "lucide-react";
+import { Monitor, Share2, ShieldCheck, ArrowRight, Wifi, Cpu, CheckCircle2 } from "lucide-react";
 import { io, Socket } from "socket.io-client";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "https://remote-control-llza.onrender.com";
@@ -21,44 +21,55 @@ export default function Home() {
   
   // State to hold this specific device's persistent info
   const [myDeviceInfo, setMyDeviceInfo] = useState<{ label: string; mac: string; ip: string } | null>(null);
+  
+  const socketRef = useRef<Socket | null>(null);
   const router = useRouter();
 
   useEffect(() => {
     // 1. Check if this device has connected before
-    let savedDevice = localStorage.getItem("remote-device-identity");
-    let currentDevice;
+    const savedDevice = localStorage.getItem("remote-device-identity");
+    let currentDevice: { label: string; mac: string; ip: string };
 
     if (savedDevice) {
-      currentDevice = JSON.parse(savedDevice);
+      try {
+        currentDevice = JSON.parse(savedDevice);
+      } catch {
+        currentDevice = generateIdentity();
+      }
     } else {
-      // 2. First time connecting: Generate a persistent identity and save it
-      // In a real browser, we use a UUID as a pseudo-MAC. In Electron, you'd fetch the real one here.
-      currentDevice = {
-        label: `Desktop-${Math.floor(Math.random() * 10000)}`,
+      currentDevice = generateIdentity();
+    }
+
+    function generateIdentity() {
+      const identity = {
+        label: `Desktop-${Math.floor(1000 + Math.random() * 9000)}`,
         mac: `Browser-Env-${Math.random().toString(36).substring(2, 10)}`, 
         ip: "Determined by Server", 
       };
-      localStorage.setItem("remote-device-identity", JSON.stringify(currentDevice));
+      localStorage.setItem("remote-device-identity", JSON.stringify(identity));
+      return identity;
     }
     
     setMyDeviceInfo(currentDevice);
     setHostName(currentDevice.label); // Auto-fill the broadcast name
 
-    // 3. Connect to the server, passing our persistent identity so the server knows who we are
-    const socket: Socket = io(BACKEND_URL, {
+    // 2. Connect to the signaling server with persistent identity headers
+    const socket = io(BACKEND_URL, {
       query: {
         label: currentDevice.label,
         mac: currentDevice.mac
       }
     });
 
+    socketRef.current = socket;
+
     socket.on("connect", () => {
-      console.log("Connected to signaling server");
+      console.log("> Connected to signaling server with Socket ID:", socket.id);
     });
 
-    // 4. Listen for the broadcasted list of devices
+    // 3. Listen for broadcasted list of online devices
     socket.on("online-devices", (devices: Device[]) => {
-      // Filter out our own device using our MAC/Identity so we don't connect to ourselves
+      // Filter out our own device using MAC so we don't list ourselves
       const otherDevices = devices.filter((d) => d.mac !== currentDevice.mac);
       setOnlineDevices(otherDevices);
     });
@@ -72,14 +83,15 @@ export default function Home() {
     e.preventDefault();
     if (!hostName) return;
     
-    // Update local storage if the user changes their device label
+    // Update local storage if the user edited their device label
     if (myDeviceInfo) {
       const updatedInfo = { ...myDeviceInfo, label: hostName };
       localStorage.setItem("remote-device-identity", JSON.stringify(updatedInfo));
     }
 
-    const generatedId = Math.random().toString(36).substring(2, 9);
-    router.push(`/room/${generatedId}?host=true&name=${encodeURIComponent(hostName)}`);
+    // CRITICAL: Use the active socket.id as the Room ID so remote users selecting this device connect to the exact same room
+    const roomId = socketRef.current?.id || Math.random().toString(36).substring(2, 9);
+    router.push(`/room/${roomId}?host=true&name=${encodeURIComponent(hostName)}`);
   };
 
   const joinRoom = (e: React.FormEvent) => {
@@ -141,10 +153,10 @@ export default function Home() {
           <form onSubmit={joinRoom} className="mt-6 space-y-4">
             <input 
               type="text" 
-              placeholder="Enter Session / Room ID" 
+              placeholder="Enter Session / Room ID or Select Below" 
               value={roomIdInput}
               onChange={(e) => setRoomIdInput(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500 transition-colors"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500 transition-colors font-mono"
               required
             />
             <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 font-medium py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/20">
@@ -163,26 +175,37 @@ export default function Home() {
               {onlineDevices.length === 0 ? (
                 <p className="text-xs text-slate-500 italic">No other devices currently online.</p>
               ) : (
-                onlineDevices.map((device) => (
-                  <div 
-                    key={device.socketId}
-                    onClick={() => setRoomIdInput(device.socketId)}
-                    className="flex flex-col p-3 rounded-lg bg-slate-950/50 border border-slate-800 hover:border-emerald-500/50 cursor-pointer transition-colors"
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm font-semibold text-slate-200">{device.label}</span>
-                      <span className="flex items-center gap-1.5 text-xs text-emerald-400">
-                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                        Online
-                      </span>
+                onlineDevices.map((device) => {
+                  const isSelected = roomIdInput === device.socketId;
+                  return (
+                    <div 
+                      key={device.socketId}
+                      onClick={() => setRoomIdInput(device.socketId)}
+                      className={`flex flex-col p-3 rounded-lg border cursor-pointer transition-all ${
+                        isSelected 
+                          ? "bg-emerald-950/30 border-emerald-500/80 shadow-md shadow-emerald-500/10" 
+                          : "bg-slate-950/50 border-slate-800 hover:border-emerald-500/50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                          {device.label}
+                          {isSelected && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+                        </span>
+                        <span className="flex items-center gap-1.5 text-xs text-emerald-400">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                          Online
+                        </span>
+                      </div>
+                      
+                      {/* IP and MAC Display */}
+                      <div className="flex items-center gap-3 text-[11px] text-slate-500 font-mono">
+                        <span>IP: {device.ip || "Unknown"}</span>
+                        <span>MAC: {device.mac || "Unknown"}</span>
+                      </div>
                     </div>
-                    {/* Displaying IP and MAC */}
-                    <div className="flex items-center gap-3 text-[11px] text-slate-500 font-mono">
-                      <span>IP: {device.ip || "Unknown"}</span>
-                      <span>MAC: {device.mac || "Unknown"}</span>
-                    </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
