@@ -1,69 +1,111 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
-import { io } from "socket.io-client";
-import { Mic, MicOff, Video, VideoOff, StopCircle, ShieldAlert } from "lucide-react";
+import { io, Socket } from "socket.io-client";
+import { StopCircle, Monitor } from "lucide-react";
 
-const ICE_SERVERS = {
-  iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }],
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "https://remote-control-llza.onrender.com";
+
+const ICE_SERVERS: RTCConfiguration = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" }
+  ],
 };
 
 export default function RoomPage() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const roomId = params.roomId;
+  const roomId = params.roomId as string;
   const isHost = searchParams.get("host") === "true";
 
   const [connected, setConnected] = useState(false);
-  const socketRef = useRef(null);
-  const peerRef = useRef(null);
-  const localStreamRef = useRef(null);
-  
-  const videoRef = useRef(null);
+  const socketRef = useRef<Socket | null>(null);
+  const peerRef = useRef<RTCPeerConnection | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
-    socketRef.current = io();
+    // 1. Connect directly to the Render signaling backend
+    const socket = io(BACKEND_URL);
+    socketRef.current = socket;
 
-    socketRef.current.emit("join-room", roomId, socketRef.current.id);
+    socket.on("connect", () => {
+      console.log("> Connected to signaling backend:", socket.id);
+      
+      // Join the room once connected
+      socket.emit("join-room", roomId, socket.id);
 
-    socketRef.current.on("user-connected", async (userId) => {
-      if (isHost) {
-        await initiateCall(userId);
-      }
-    });
-
-    socketRef.current.on("offer", async ({ offer, sender }) => {
+      // If viewer, ask the host to send/re-send their video offer
       if (!isHost) {
-        await handleReceiveOffer(offer, sender);
+        socket.emit("request-stream", { roomId });
       }
     });
 
-    socketRef.current.on("answer", async ({ answer }) => {
-      if (peerRef.current) {
-        await peerRef.current.setRemoteDescription(new RTCSessionDescription(answer));
-      }
-    });
-
-    socketRef.current.on("ice-candidate", async ({ candidate }) => {
-      if (peerRef.current && candidate) {
-        await peerRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-      }
-    });
-
-    // Handle Remote Control Commands on Host side
-    if (isHost) {
-      socketRef.current.on("remote-control-event", (eventData) => {
-        // Execute simulated or direct window operations depending on context
-        console.log("Remote control instruction received:", eventData);
-      });
-    }
-
+    // 2. Start Screen Capture if this client is the Host
     if (isHost) {
       startScreenShare();
     }
 
+    // 3. Listener: Host receives a request to send stream to a new or reconnected viewer
+    socket.on("request-stream", async (data: { requesterId: string }) => {
+      if (isHost && data?.requesterId) {
+        console.log(`> Viewer [${data.requesterId}] requested stream. Sending offer...`);
+        await initiateCall(data.requesterId);
+      }
+    });
+
+    // 4. Listener: Host receives user-connected event
+    socket.on("user-connected", async (data: any) => {
+      if (isHost) {
+        const targetId = typeof data === "object" ? (data.socketId || data.userId) : data;
+        if (targetId && targetId !== socket.id) {
+          console.log(`> User connected [${targetId}]. Initiating WebRTC call...`);
+          await initiateCall(targetId);
+        }
+      }
+    });
+
+    // 5. Listener: Viewer receives offer from Host
+    socket.on("offer", async ({ offer, sender }: { offer: RTCSessionDescriptionInit; sender: string }) => {
+      if (!isHost) {
+        console.log(`> Received offer from host [${sender}]`);
+        await handleReceiveOffer(offer, sender);
+      }
+    });
+
+    // 6. Listener: Host receives answer back from Viewer
+    socket.on("answer", async ({ answer }: { answer: RTCSessionDescriptionInit }) => {
+      if (peerRef.current) {
+        console.log("> Received WebRTC answer from viewer");
+        await peerRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+      }
+    });
+
+    // 7. Listener: ICE Candidates exchange
+    socket.on("ice-candidate", async ({ candidate }: { candidate: RTCIceCandidateInit }) => {
+      if (peerRef.current && candidate) {
+        try {
+          await peerRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (err) {
+          console.error("Error adding ICE Candidate:", err);
+        }
+      }
+    });
+
+    // 8. Remote Control Events (Host side execution)
+    if (isHost) {
+      socket.on("remote-control-event", (eventData) => {
+        console.log("Remote control instruction received:", eventData);
+      });
+    }
+
     return () => {
-      socketRef.current.disconnect();
+      socket.disconnect();
+      if (peerRef.current) {
+        peerRef.current.close();
+      }
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => track.stop());
       }
@@ -72,9 +114,16 @@ export default function RoomPage() {
 
   const startScreenShare = async () => {
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: "always" }, audio: true });
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { cursor: "always" } as any,
+        audio: true
+      });
+      
       localStreamRef.current = stream;
-      if (videoRef.current) videoRef.current.srcObject = stream;
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
 
       stream.getVideoTracks()[0].onended = () => {
         stopSharing();
@@ -84,25 +133,39 @@ export default function RoomPage() {
     }
   };
 
-  const createPeerConnection = (targetId) => {
+  const createPeerConnection = (targetId: string) => {
+    if (peerRef.current) {
+      peerRef.current.close();
+    }
+
     const peer = new RTCPeerConnection(ICE_SERVERS);
     peerRef.current = peer;
 
+    // Host attaches screen tracks to the WebRTC connection
     if (isHost && localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
-        peer.addTrack(track, localStreamRef.current);
+        peer.addTrack(track, localStreamRef.current!);
       });
     }
 
     peer.onicecandidate = (event) => {
-      if (event.candidate) {
-        socketRef.current.emit("ice-candidate", { candidate: event.candidate, target: targetId, roomId });
+      if (event.candidate && socketRef.current) {
+        socketRef.current.emit("ice-candidate", {
+          candidate: event.candidate,
+          target: targetId,
+          roomId
+        });
       }
     };
 
+    // Viewer receives remote screen stream
     peer.ontrack = (event) => {
-      if (!isHost && videoRef.current) {
+      console.log("> Stream track received on viewer side");
+      if (!isHost && videoRef.current && event.streams[0]) {
         videoRef.current.srcObject = event.streams[0];
+        
+        // Explicitly trigger play to prevent browser autoplay blockages
+        videoRef.current.play().catch((err) => console.error("Autoplay play() error:", err));
         setConnected(true);
       }
     };
@@ -110,19 +173,34 @@ export default function RoomPage() {
     return peer;
   };
 
-  const initiateCall = async (userId) => {
-    const peer = createPeerConnection(userId);
+  const initiateCall = async (targetId: string) => {
+    const peer = createPeerConnection(targetId);
     const offer = await peer.createOffer();
     await peer.setLocalDescription(offer);
-    socketRef.current.emit("offer", { offer, target: userId, sender: socketRef.current.id });
+
+    if (socketRef.current) {
+      socketRef.current.emit("offer", {
+        offer,
+        target: targetId,
+        roomId
+      });
+    }
   };
 
-  const handleReceiveOffer = async (offer, senderId) => {
+  const handleReceiveOffer = async (offer: RTCSessionDescriptionInit, senderId: string) => {
     const peer = createPeerConnection(senderId);
     await peer.setRemoteDescription(new RTCSessionDescription(offer));
+    
     const answer = await peer.createAnswer();
     await peer.setLocalDescription(answer);
-    socketRef.current.emit("answer", { answer, target: senderId });
+
+    if (socketRef.current) {
+      socketRef.current.emit("answer", {
+        answer,
+        target: senderId,
+        roomId
+      });
+    }
     setConnected(true);
   };
 
@@ -133,11 +211,11 @@ export default function RoomPage() {
     window.location.href = "/";
   };
 
-  // Controller clicking mapping handler
-  const handleVideoClick = (e) => {
-    if (isHost) return; // Host doesn't control local screen via this view
+  // Click handler for remote interaction
+  const handleVideoClick = (e: React.MouseEvent<HTMLVideoElement>) => {
+    if (isHost || !socketRef.current) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width; // Percentage scale
+    const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
 
     socketRef.current.emit("remote-control-event", {
@@ -168,6 +246,7 @@ export default function RoomPage() {
             ref={videoRef} 
             autoPlay 
             playsInline 
+            muted // Crucial: muted prevents browser autoplay restrictions from blocking video load
             onClick={handleVideoClick}
             className="w-full h-full object-contain cursor-crosshair"
           />
@@ -182,10 +261,14 @@ export default function RoomPage() {
 
       {/* Bottom Controls Bar */}
       <footer className="h-20 border-t border-slate-800 bg-slate-900/40 backdrop-blur px-6 flex items-center justify-center gap-4">
-        {isHost && (
+        {isHost ? (
           <button onClick={stopSharing} className="bg-rose-600 hover:bg-rose-500 px-5 py-2.5 rounded-xl font-medium text-sm flex items-center gap-2 transition-all shadow-lg shadow-rose-600/20">
             <StopCircle className="w-4 h-4" /> Stop Sharing
           </button>
+        ) : (
+          <div className="text-xs text-slate-400 flex items-center gap-2">
+            <Monitor className="w-4 h-4 text-emerald-400" /> Remote interaction active. Click screen to interact.
+          </div>
         )}
       </footer>
     </div>
