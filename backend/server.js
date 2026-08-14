@@ -13,9 +13,8 @@ mongoose.connect(MONGODB_URI)
     console.error("MongoDB connection error:", err);
   });
 
-// Standard Node HTTP Server (No Express dependency required)
+// Standard Node HTTP Server
 const server = createServer((req, res) => {
-  // Basic health check endpoint
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("OK");
@@ -31,14 +30,29 @@ const io = new Server(server, {
   cors: { origin: "*" },
 });
 
+// Track all currently online devices
+const onlineDevices = new Map();
+
 io.on("connection", (socket) => {
+  // 1. Generate a device label for the new connection
+  const deviceLabel = `Device-${Math.floor(Math.random() * 10000)}`;
+  
+  // Store device data
+  const deviceInfo = {
+    socketId: socket.id,
+    label: deviceLabel,
+    status: "online"
+  };
+  
+  onlineDevices.set(socket.id, deviceInfo);
+  console.log(`> Connected: ${deviceLabel} (${socket.id})`);
+
+  // 2. Broadcast the updated list of all online devices to EVERY connected client
+  io.emit("online-devices", Array.from(onlineDevices.values()));
+
   socket.on("join-room", (roomId, userId) => {
     socket.join(roomId);
     socket.to(roomId).emit("user-connected", userId);
-
-    socket.on("disconnect", () => {
-      socket.to(roomId).emit("user-disconnected", userId);
-    });
   });
 
   socket.on("offer", (payload) => {
@@ -55,6 +69,17 @@ io.on("connection", (socket) => {
 
   socket.on("remote-control-event", (data) => {
     socket.to(data.roomId).emit("remote-control-event", data.event);
+  });
+
+  // Handle Disconnection
+  socket.on("disconnect", () => {
+    console.log(`> Disconnected: ${deviceLabel}`);
+    
+    // Remove the device from our Map
+    onlineDevices.delete(socket.id);
+    
+    // Broadcast the updated list again
+    io.emit("online-devices", Array.from(onlineDevices.values()));
   });
 });
 
