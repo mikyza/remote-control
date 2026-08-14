@@ -1,12 +1,21 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Monitor, Share2, ShieldCheck, ArrowRight } from "lucide-react";
+
+// Your Render backend URL
+const BACKEND_URL = "https://remote-control-llza.onrender.com";
 
 export default function Home() {
   const [roomIdInput, setRoomIdInput] = useState("");
   const [hostName, setHostName] = useState("");
   const router = useRouter();
+
+  // Wakes up the Render server in the background 
+  // so the WebSocket is ready by the time a user joins a room.
+  useEffect(() => {
+    fetch(BACKEND_URL).catch(() => console.log("Waking up signaling server..."));
+  }, []);
 
   const createRoom = async (e: React.FormEvent) => {
     e.preventDefault();
