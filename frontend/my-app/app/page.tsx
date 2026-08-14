@@ -1,25 +1,48 @@
 "use client";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Monitor, Share2, ShieldCheck, ArrowRight } from "lucide-react";
+import { Monitor, Share2, ShieldCheck, ArrowRight, Wifi } from "lucide-react";
+import { io, Socket } from "socket.io-client";
 
 // Your Render backend URL
-const BACKEND_URL = "https://remote-control-llza.onrender.com";
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "https://remote-control-llza.onrender.com";
+
+interface Device {
+  socketId: string;
+  label: string;
+  status: string;
+}
 
 export default function Home() {
   const [roomIdInput, setRoomIdInput] = useState("");
   const [hostName, setHostName] = useState("");
+  const [onlineDevices, setOnlineDevices] = useState<Device[]>([]);
   const router = useRouter();
 
-  // Wakes up the Render server in the background 
-  // so the WebSocket is ready by the time a user joins a room.
   useEffect(() => {
-    fetch(BACKEND_URL).catch(() => console.log("Waking up signaling server..."));
+    // Connect to the signaling server to get live devices
+    const socket: Socket = io(BACKEND_URL);
+
+    socket.on("connect", () => {
+      console.log("Connected to signaling server");
+    });
+
+    // Listen for the broadcasted list of devices from the server
+    socket.on("online-devices", (devices: Device[]) => {
+      // Filter out our own socket so we don't try to connect to ourselves
+      const otherDevices = devices.filter((d) => d.socketId !== socket.id);
+      setOnlineDevices(otherDevices);
+    });
+
+    return () => {
+      socket.disconnect();
+    };
   }, []);
 
   const createRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!hostName) return;
+    // You can use the generated ID, or adapt this to use the socket.id
     const generatedId = Math.random().toString(36).substring(2, 9);
     router.push(`/room/${generatedId}?host=true&name=${encodeURIComponent(hostName)}`);
   };
@@ -34,7 +57,7 @@ export default function Home() {
     <main className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 selection:bg-indigo-500 selection:text-white">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(99,102,241,0.08)_0,transparent_100%)] pointer-events-none" />
       
-      <div className="max-w-4xl w-full grid grid-cols-1 md:grid-cols-2 gap-8 relative z-10">
+      <div className="max-w-5xl w-full grid grid-cols-1 md:grid-cols-2 gap-8 relative z-10">
         {/* Host Section */}
         <div className="bg-slate-900/60 border border-slate-800 p-8 rounded-2xl backdrop-blur-xl flex flex-col justify-between shadow-2xl shadow-indigo-500/5">
           <div>
@@ -60,15 +83,16 @@ export default function Home() {
         </div>
 
         {/* Control Section */}
-        <div className="bg-slate-900/60 border border-slate-800 p-8 rounded-2xl backdrop-blur-xl flex flex-col justify-between shadow-2xl">
+        <div className="bg-slate-900/60 border border-slate-800 p-8 rounded-2xl backdrop-blur-xl flex flex-col shadow-2xl">
           <div>
             <div className="w-12 h-12 rounded-xl bg-emerald-600/20 text-emerald-400 flex items-center justify-center mb-6">
               <Monitor className="w-6 h-6" />
             </div>
             <h2 className="text-2xl font-bold tracking-tight">Control a Device</h2>
-            <p className="text-slate-400 text-sm mt-2">Connect instantly using a secure session token to view and control remote devices.</p>
+            <p className="text-slate-400 text-sm mt-2">Connect instantly using a secure session token or select an active device below.</p>
           </div>
-          <form onSubmit={joinRoom} className="mt-8 space-y-4">
+          
+          <form onSubmit={joinRoom} className="mt-6 space-y-4">
             <input 
               type="text" 
               placeholder="Enter Session / Room ID" 
@@ -81,6 +105,34 @@ export default function Home() {
               Connect & Control <ShieldCheck className="w-4 h-4" />
             </button>
           </form>
+
+          {/* Online Devices List */}
+          <div className="mt-8 pt-6 border-t border-slate-800">
+            <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-4">
+              <Wifi className="w-4 h-4 text-emerald-500" /> 
+              Online Devices ({onlineDevices.length})
+            </h3>
+            
+            <div className="space-y-2 max-h-40 overflow-y-auto pr-2 custom-scrollbar">
+              {onlineDevices.length === 0 ? (
+                <p className="text-xs text-slate-500 italic">No other devices currently online.</p>
+              ) : (
+                onlineDevices.map((device) => (
+                  <div 
+                    key={device.socketId}
+                    onClick={() => setRoomIdInput(device.socketId)}
+                    className="flex items-center justify-between p-3 rounded-lg bg-slate-950/50 border border-slate-800 hover:border-emerald-500/50 cursor-pointer transition-colors"
+                  >
+                    <span className="text-sm font-medium text-slate-200">{device.label}</span>
+                    <span className="flex items-center gap-1.5 text-xs text-emerald-400">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                      Online
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </main>
